@@ -3,11 +3,10 @@
 A local-first memory for AI coding agents. One static binary, one plain-text
 store, no embeddings, no model, no network.
 
-Most agent-memory tools record *everything* that happens and recall it by vector
-similarity. `recoil` does the opposite on both axes:
 
-- **It writes only on a flinch.** A memory is recorded when the development loop
-  is *surprised* — a command errored, a test went red, a change got reverted, the
+
+- **It writes only on a critical.** A memory is recorded when the development loop
+  is *stagering* — a command errored, a test went red, a change got reverted, the
   user corrected you. Routine, unsurprising activity is not stored. Surprise is
   the encode gate, and it comes from signals you already have (`$?`, `git`), not
   from a model scoring text.

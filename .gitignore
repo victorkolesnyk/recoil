@@ -1,0 +1,11 @@
+# build artifacts
+/recoil
+/recoil.exe
+/dist/
+
+# local memory store (data, not source)
+.recoil/
+
+# go
+*.test
+*.out

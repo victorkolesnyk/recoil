@@ -7,7 +7,7 @@ store, no embeddings, no model, no network.
 
 - **It writes only on a critical.** A memory is recorded when the development loop
   is *stagering* — a command errored, a test went red, a change got reverted, the
-  user corrected you. Routine, unsurprising activity is not stored. Surprise is
+  user corrected msg. Routine, unsurprising activity is not stored. Surprise is
   the encode gate, and it comes from signals you already have (`$?`, `git`), not
   from a model scoring text.
 - **It recalls by the present situation, deterministically.** A memory is a *cue*

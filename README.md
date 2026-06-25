@@ -13,6 +13,8 @@ again. One Go binary, a plain text file, no embeddings.
 - Records failures for you: `recoil watch -- <cmd>` remembers anything that exits
   non-zero, no manual step.
 - Records git reverts for you, via a post-commit hook.
+- Warns you before you repeat a known-bad change — a git pre-commit hook that
+  flags when you're touching something that bit you before.
 - Surfaces the lessons that keep mattering — each recall makes one a little louder.
 - Lets unused lessons fade, and `recoil decay` clears out the ones that stopped
   mattering — recall keeps the useful ones alive.
@@ -56,7 +58,20 @@ Wrap a command. If it fails, recoil records it for you:
 recoil watch -- go test ./...
 ```
 
-Install a git hook to record reverts:
+## Warn before you repeat it
+
+`recoil guard` checks what you're about to change against the things that went
+wrong before — errors, reverts, corrections, not plain notes — and warns you if
+you're walking back into one:
+
+```sh
+recoil guard --files src/foo.go
+# recoil: been burned here before — Assert.ThrowsAsync hangs the EditMode runner
+```
+
+With no arguments in a git repo it checks your staged files, so it runs as a
+pre-commit hook. Wire up both hooks — the pre-commit guard and the post-commit
+revert recorder — with one command (it won't overwrite hooks you already have):
 
 ```sh
 recoil hook --install
@@ -81,9 +96,10 @@ recoil decay              # forget it
 recoil init                       create the store
 recoil encode --gist .. --cue ..  record a lesson
 recoil recall [--situation ..]    show matching lessons (also reads stdin)
+recoil guard [--files a,b]        warn if you're repeating a known-bad change
 recoil decay [--dry-run]          forget lessons that have faded
 recoil watch -- <cmd>             run a command, record it if it fails
-recoil hook [--install]           git post-commit hook for reverts
+recoil hook [--install]           git pre/post-commit hooks (warn, record reverts)
 recoil list                       show everything stored
 ```
 

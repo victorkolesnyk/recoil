@@ -104,3 +104,25 @@ func TestPartitionDecayForgetsFaded(t *testing.T) {
 		t.Errorf("expected to forget 'ancient', forgot %+v", forget)
 	}
 }
+
+func TestGuardWarnsOnBurnsNotNotes(t *testing.T) {
+	const now = int64(0)
+	recs := []record{
+		{Trigger: "error", Weight: 1.5, Cue: "build gitignore", Last: now},
+		{Trigger: "manual", Weight: 1, Cue: "build gitignore", Last: now}, // a plain note — no warning
+	}
+	got := guardMatches(recs, tokenize("touching build and gitignore"), now, defaultHalfLifeDays, defaultGuardMin)
+	if len(got) != 1 || got[0].Trigger != "error" {
+		t.Fatalf("guard should warn only on the error memory, got %+v", got)
+	}
+}
+
+func TestGuardSkipsFadedMemories(t *testing.T) {
+	now := 1000 * day
+	recs := []record{
+		{Trigger: "error", Weight: 1.5, Cue: "alpha", Last: now - 365*day}, // faded below the guard floor
+	}
+	if got := guardMatches(recs, tokenize("alpha"), now, defaultHalfLifeDays, defaultGuardMin); len(got) != 0 {
+		t.Errorf("a faded memory should not warn, got %+v", got)
+	}
+}

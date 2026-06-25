@@ -2,10 +2,11 @@
 //
 // recoil remembers the things that go wrong in the development loop — a failed
 // command, a revert, a correction — as a cue (the situation it happened in) plus
-// a gist (the lesson), and surfaces those gists when the current situation looks
-// the same. Matching is deterministic keyword cue-overlap: no embeddings, no
-// model, no network. Memories fade when they stop being useful. One static
-// binary, one plain-text store.
+// a gist (the lesson). It surfaces those gists when the current situation looks
+// the same, and warns before you repeat a known-bad change. Matching is
+// deterministic keyword cue-overlap: no embeddings, no model, no network.
+// Memories fade when they stop being useful. One static binary, one plain-text
+// store.
 package main
 
 import (
@@ -24,7 +25,7 @@ import (
 	"time"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -40,6 +41,8 @@ func main() {
 		cmdRecall(os.Args[2:])
 	case "decay":
 		cmdDecay(os.Args[2:])
+	case "guard":
+		cmdGuard(os.Args[2:])
 	case "watch":
 		cmdWatch(os.Args[2:])
 	case "hook":
@@ -62,8 +65,9 @@ usage:
   recoil encode --gist "<lesson>" --cue "<tokens>" [--trigger T] [--weight N]
   recoil recall [--situation "<text>"] [--files a,b] [--top N]   (also reads stdin)
   recoil decay [--floor F] [--half-life D] [--dry-run]    forget faded memories
+  recoil guard [--files a,b] [--situation "<text>"] [--block]    warn before a known-bad change
   recoil watch -- <command> [args...]    run a command; remember it if it fails
-  recoil hook [--install]                git post-commit hook that records reverts
+  recoil hook [--install]                git pre/post-commit hooks (warn, record reverts)
   recoil list
   recoil version
 
@@ -250,11 +254,12 @@ func sortedTokens(set map[string]bool) []string {
 	return out
 }
 
-// --- strength, scoring, decay (pure: no I/O, so they are unit-testable) ---
+// --- strength, scoring, decay, guard (pure: no I/O, so they are unit-testable) ---
 
 const (
 	defaultHalfLifeDays = 30.0 // a memory loses half its strength every 30 unused days
 	defaultFloor        = 0.1  // decay forgets memories whose strength falls below this
+	defaultGuardMin     = 0.5  // guard warns only on memories at least this strong
 )
 
 func halfLifeDays() float64 {
@@ -322,6 +327,24 @@ func partitionDecay(recs []record, now int64, floor, halfLife float64) (keep, fo
 	return keep, forget
 }
 
+// guardMatches returns the surprise-born memories (not plain notes) that overlap
+// the situation and are still strong enough to warn about — the "you've been
+// here before" set, most relevant first.
+func guardMatches(recs []record, situation map[string]bool, now int64, halfLife, minStrength float64) []record {
+	var out []record
+	for _, f := range scoreRecords(recs, situation, now, halfLife) {
+		r := recs[f.idx]
+		if r.Trigger == "manual" {
+			continue // guard is about things that went wrong, not plain notes
+		}
+		if strength(r, now, halfLife) < minStrength {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 // --- commands ---
 
 func cmdInit(args []string) {
@@ -383,6 +406,25 @@ func cmdEncode(args []string) {
 	fmt.Printf("recoil: remembered [%s w=%g] %s\n", r.Trigger, r.Weight, r.Gist)
 }
 
+// situationFrom builds a situation string from flags, piped stdin, and — if all
+// of those are empty and we're in a git repo — the staged files.
+func situationFrom(situationFlag, files string, fallbackToStaged bool) map[string]bool {
+	var sb strings.Builder
+	sb.WriteString(situationFlag)
+	sb.WriteByte(' ')
+	sb.WriteString(strings.ReplaceAll(files, ",", " "))
+	if fi, err := os.Stdin.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) == 0 {
+		if b, err := io.ReadAll(os.Stdin); err == nil {
+			sb.WriteByte(' ')
+			sb.Write(b)
+		}
+	}
+	if fallbackToStaged && strings.TrimSpace(sb.String()) == "" {
+		sb.WriteString(stagedFiles())
+	}
+	return tokenize(sb.String())
+}
+
 func cmdRecall(args []string) {
 	fs := flag.NewFlagSet("recall", flag.ExitOnError)
 	situationFlag := fs.String("situation", "", "describe the current situation")
@@ -390,18 +432,7 @@ func cmdRecall(args []string) {
 	top := fs.Int("top", 3, "max memories to fire")
 	fs.Parse(args)
 
-	var sb strings.Builder
-	sb.WriteString(*situationFlag)
-	sb.WriteByte(' ')
-	sb.WriteString(strings.ReplaceAll(*files, ",", " "))
-	if fi, err := os.Stdin.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) == 0 {
-		if b, err := io.ReadAll(os.Stdin); err == nil {
-			sb.WriteByte(' ')
-			sb.Write(b)
-		}
-	}
-
-	situation := tokenize(sb.String())
+	situation := situationFrom(*situationFlag, *files, false)
 	if len(situation) == 0 {
 		fmt.Fprintln(os.Stderr, "recoil recall: no situation given (use --situation, --files, or pipe text)")
 		os.Exit(2)
@@ -442,6 +473,35 @@ func reinforce(recs []record, fired []scored) {
 	}
 	if err := saveRecords(recs); err != nil {
 		fmt.Fprintln(os.Stderr, "recoil:", err)
+	}
+}
+
+// cmdGuard warns, before you act, if what you're about to change matches a memory
+// of something that went wrong here before (an error, revert, correction, or
+// failed test — not a plain note). With no situation given it checks the staged
+// files, so it runs as a pre-commit hook. It is read-only: it does not reinforce.
+func cmdGuard(args []string) {
+	fs := flag.NewFlagSet("guard", flag.ExitOnError)
+	files := fs.String("files", "", "comma-separated files you're about to change")
+	situationFlag := fs.String("situation", "", "describe what you're about to do")
+	minStrength := fs.Float64("min-strength", defaultGuardMin, "only warn on memories at least this strong")
+	block := fs.Bool("block", false, "exit non-zero if a warning fires (abort the action)")
+	fs.Parse(args)
+
+	situation := situationFrom(*situationFlag, *files, true)
+	if len(situation) == 0 {
+		return // nothing to check — stay quiet
+	}
+	recs, err := loadRecords()
+	if err != nil {
+		die(err)
+	}
+	warnings := guardMatches(recs, situation, time.Now().Unix(), halfLifeDays(), *minStrength)
+	for _, r := range warnings {
+		fmt.Fprintf(os.Stderr, "recoil: been burned here before — %s\n", r.Gist)
+	}
+	if len(warnings) > 0 && *block {
+		os.Exit(1)
 	}
 }
 
@@ -562,6 +622,21 @@ func changedFiles() string {
 	return b.String()
 }
 
+// stagedFiles lists the files staged for the next commit, best-effort. Outside a
+// git repo it returns "".
+func stagedFiles() string {
+	out, err := exec.Command("git", "diff", "--cached", "--name-only").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.ReplaceAll(string(out), "\n", " ")
+}
+
+const preCommitHook = `#!/bin/sh
+# recoil: warn before repeating a known-bad change (installed by 'recoil hook --install')
+recoil guard
+`
+
 const postCommitHook = `#!/bin/sh
 # recoil: record reverts as flinches (installed by 'recoil hook --install')
 subject=$(git log -1 --pretty=%s)
@@ -573,27 +648,42 @@ case "$subject" in
 esac
 `
 
+// cmdHook prints or installs recoil's git hooks: a pre-commit that warns before a
+// known-bad change, and a post-commit that records reverts. Install never
+// overwrites a hook you already have.
 func cmdHook(args []string) {
 	fs := flag.NewFlagSet("hook", flag.ExitOnError)
-	install := fs.Bool("install", false, "write the hook into the repo's git hooks dir")
+	install := fs.Bool("install", false, "write recoil's git hooks (won't overwrite existing ones)")
 	fs.Parse(args)
 
+	hooks := []struct{ name, body string }{
+		{"pre-commit", preCommitHook},
+		{"post-commit", postCommitHook},
+	}
 	if !*install {
-		os.Stdout.WriteString(postCommitHook)
+		for _, h := range hooks {
+			fmt.Printf("# %s\n%s\n", h.name, h.body)
+		}
 		return
 	}
-	out, err := exec.Command("git", "rev-parse", "--git-path", "hooks/post-commit").Output()
-	if err != nil {
-		die(fmt.Errorf("not a git repository (run this inside one): %w", err))
+	for _, h := range hooks {
+		out, err := exec.Command("git", "rev-parse", "--git-path", "hooks/"+h.name).Output()
+		if err != nil {
+			die(fmt.Errorf("not a git repository (run this inside one): %w", err))
+		}
+		path := strings.TrimSpace(string(out))
+		if _, err := os.Stat(path); err == nil {
+			fmt.Printf("recoil: %s already exists — not touching it; run `recoil hook` to see the snippet to add\n", h.name)
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			die(err)
+		}
+		if err := os.WriteFile(path, []byte(h.body), 0o755); err != nil {
+			die(err)
+		}
+		fmt.Printf("recoil: installed %s\n", path)
 	}
-	hookPath := strings.TrimSpace(string(out))
-	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
-		die(err)
-	}
-	if err := os.WriteFile(hookPath, []byte(postCommitHook), 0o755); err != nil {
-		die(err)
-	}
-	fmt.Printf("recoil: installed post-commit hook at %s\n", hookPath)
 }
 
 func cmdList(args []string) {
@@ -617,3 +707,6 @@ func die(err error) {
 	fmt.Fprintln(os.Stderr, "recoil:", err)
 	os.Exit(1)
 }
+
+// Maskim Taxist was here.
+

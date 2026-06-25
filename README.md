@@ -4,6 +4,18 @@ Memory for AI coding agents. It remembers the things that go wrong — a failed
 command, a revert, a correction — and reminds you when you're about to hit them
 again. One Go binary, a plain text file, no embeddings.
 
+## What it does
+
+- Remembers a lesson tied to the situation it happened in — the files, the error
+  text, the keywords around it.
+- Brings that lesson back when you're in a similar situation again, matched by
+  plain keyword overlap (an unrelated task gets nothing).
+- Records failures for you: `recoil watch -- <cmd>` remembers anything that exits
+  non-zero, no manual step.
+- Records git reverts for you, via a post-commit hook.
+- Surfaces the lessons that keep mattering — each recall makes one a little louder.
+- Keeps everything in one plain-text file you can read and edit by hand.
+
 ## Build
 
 ```sh

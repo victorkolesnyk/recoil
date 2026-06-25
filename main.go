@@ -1,26 +1,29 @@
 // Command recoil is a local-first memory for AI coding agents.
 //
-// recoil records only what surprised the development loop — a failed command,
-// a revert, a correction — as a cue (the situation it happened in) plus a gist
-// (the lesson), and fires those gists back when the current situation matches.
-// Matching is deterministic keyword cue-overlap: no embeddings, no model, no
-// network. One static binary, one plain-text store.
+// recoil remembers the things that go wrong in the development loop — a failed
+// command, a revert, a correction — as a cue (the situation it happened in) plus
+// a gist (the lesson), and surfaces those gists when the current situation looks
+// the same. Matching is deterministic keyword cue-overlap: no embeddings, no
+// model, no network. One static binary, one plain-text store.
 package main
 
 import (
 	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -34,6 +37,10 @@ func main() {
 		cmdEncode(os.Args[2:])
 	case "recall":
 		cmdRecall(os.Args[2:])
+	case "watch":
+		cmdWatch(os.Args[2:])
+	case "hook":
+		cmdHook(os.Args[2:])
 	case "list":
 		cmdList(os.Args[2:])
 	case "version", "--version", "-v":
@@ -51,6 +58,8 @@ usage:
   recoil init
   recoil encode --gist "<lesson>" --cue "<tokens>" [--trigger T] [--weight N]
   recoil recall [--situation "<text>"] [--files a,b] [--top N]   (also reads stdin)
+  recoil watch -- <command> [args...]    run a command; remember it if it fails
+  recoil hook [--install]                git post-commit hook that records reverts
   recoil list
   recoil version
 
@@ -73,7 +82,7 @@ func storePath() string { return filepath.Join(storeDir(), "store.tsv") }
 // --- record model ---
 
 // record is one remembered flinch: a cue (the situation that triggered it) plus
-// a gist (the lesson), with salience bookkeeping for ranking and (later) decay.
+// a gist (the lesson), with salience bookkeeping for ranking and re-fire.
 type record struct {
 	ID      string
 	Created int64
@@ -94,31 +103,35 @@ func clean(s string) string {
 func (r record) tsv() string {
 	return strings.Join([]string{
 		r.ID,
-		fmt.Sprintf("%d", r.Created),
+		strconv.FormatInt(r.Created, 10),
 		r.Trigger,
-		fmt.Sprintf("%g", r.Weight),
-		fmt.Sprintf("%d", r.Hits),
-		fmt.Sprintf("%d", r.Last),
+		strconv.FormatFloat(r.Weight, 'g', -1, 64),
+		strconv.Itoa(r.Hits),
+		strconv.FormatInt(r.Last, 10),
 		clean(r.Cue),
 		clean(r.Gist),
 	}, "\t")
 }
 
+// parseRecord parses one TSV line. It returns false on a wrong column count OR a
+// non-numeric numeric field, so a hand-edited store with a damaged line is
+// skipped rather than silently loaded as zero values.
 func parseRecord(line string) (record, bool) {
 	f := strings.Split(line, "\t")
 	if len(f) != 8 {
 		return record{}, false
 	}
-	var r record
-	r.ID = f[0]
-	fmt.Sscanf(f[1], "%d", &r.Created)
-	r.Trigger = f[2]
-	fmt.Sscanf(f[3], "%g", &r.Weight)
-	fmt.Sscanf(f[4], "%d", &r.Hits)
-	fmt.Sscanf(f[5], "%d", &r.Last)
-	r.Cue = f[6]
-	r.Gist = f[7]
-	return r, true
+	created, err1 := strconv.ParseInt(f[1], 10, 64)
+	weight, err2 := strconv.ParseFloat(f[3], 64)
+	hits, err3 := strconv.Atoi(f[4])
+	last, err4 := strconv.ParseInt(f[5], 10, 64)
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
+		return record{}, false
+	}
+	return record{
+		ID: f[0], Created: created, Trigger: f[2], Weight: weight,
+		Hits: hits, Last: last, Cue: f[6], Gist: f[7],
+	}, true
 }
 
 func loadRecords() ([]record, error) {
@@ -130,7 +143,9 @@ func loadRecords() ([]record, error) {
 		return nil, err
 	}
 	defer f.Close()
+
 	var recs []record
+	skipped := 0
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -140,7 +155,12 @@ func loadRecords() ([]record, error) {
 		}
 		if r, ok := parseRecord(line); ok {
 			recs = append(recs, r)
+		} else {
+			skipped++
 		}
+	}
+	if skipped > 0 {
+		fmt.Fprintf(os.Stderr, "recoil: warning: skipped %d malformed line(s) in %s\n", skipped, storePath())
 	}
 	return recs, sc.Err()
 }
@@ -226,6 +246,37 @@ func sortedTokens(set map[string]bool) []string {
 	return out
 }
 
+// --- scoring (pure: no I/O, so it is unit-testable on its own) ---
+
+type scored struct {
+	idx     int
+	score   float64
+	matched []string
+}
+
+// scoreRecords ranks records by cue overlap with the current situation, weighted
+// by encoded surprise and re-fire count. A stored cue is already normalized
+// tokens, so it is split with strings.Fields rather than re-tokenized.
+func scoreRecords(recs []record, situation map[string]bool) []scored {
+	var out []scored
+	for i, r := range recs {
+		var matched []string
+		for _, t := range strings.Fields(r.Cue) {
+			if situation[t] {
+				matched = append(matched, t)
+			}
+		}
+		if len(matched) == 0 {
+			continue
+		}
+		sort.Strings(matched)
+		salience := r.Weight * (1 + math.Log(1+float64(r.Hits)))
+		out = append(out, scored{i, float64(len(matched)) * salience, matched})
+	}
+	sort.SliceStable(out, func(a, b int) bool { return out[a].score > out[b].score })
+	return out
+}
+
 // --- commands ---
 
 func cmdInit(args []string) {
@@ -248,6 +299,16 @@ var triggerWeights = map[string]float64{
 	"manual":     1.0,
 }
 
+func weightFor(trigger string, override float64) float64 {
+	if override >= 0 {
+		return override
+	}
+	if w, ok := triggerWeights[trigger]; ok {
+		return w
+	}
+	return 1.0
+}
+
 func cmdEncode(args []string) {
 	fs := flag.NewFlagSet("encode", flag.ExitOnError)
 	gist := fs.String("gist", "", "the lesson to remember (required)")
@@ -260,20 +321,12 @@ func cmdEncode(args []string) {
 		fmt.Fprintln(os.Stderr, "recoil encode: --gist and --cue are required")
 		os.Exit(2)
 	}
-	w := *weight
-	if w < 0 {
-		if tw, ok := triggerWeights[*trigger]; ok {
-			w = tw
-		} else {
-			w = 1.0
-		}
-	}
 	now := time.Now().Unix()
 	r := record{
 		ID:      fmt.Sprintf("r%d", time.Now().UnixNano()),
 		Created: now,
 		Trigger: *trigger,
-		Weight:  w,
+		Weight:  weightFor(*trigger, *weight),
 		Hits:    0,
 		Last:    now,
 		Cue:     strings.Join(sortedTokens(tokenize(*cue)), " "),
@@ -287,13 +340,13 @@ func cmdEncode(args []string) {
 
 func cmdRecall(args []string) {
 	fs := flag.NewFlagSet("recall", flag.ExitOnError)
-	situation := fs.String("situation", "", "describe the current situation")
+	situationFlag := fs.String("situation", "", "describe the current situation")
 	files := fs.String("files", "", "comma-separated files in play")
 	top := fs.Int("top", 3, "max memories to fire")
 	fs.Parse(args)
 
 	var sb strings.Builder
-	sb.WriteString(*situation)
+	sb.WriteString(*situationFlag)
 	sb.WriteByte(' ')
 	sb.WriteString(strings.ReplaceAll(*files, ",", " "))
 	if fi, err := os.Stdin.Stat(); err == nil && (fi.Mode()&os.ModeCharDevice) == 0 {
@@ -303,8 +356,8 @@ func cmdRecall(args []string) {
 		}
 	}
 
-	situationSet := tokenize(sb.String())
-	if len(situationSet) == 0 {
+	situation := tokenize(sb.String())
+	if len(situation) == 0 {
 		fmt.Fprintln(os.Stderr, "recoil recall: no situation given (use --situation, --files, or pipe text)")
 		os.Exit(2)
 	}
@@ -313,51 +366,158 @@ func cmdRecall(args []string) {
 	if err != nil {
 		die(err)
 	}
-
-	type scored struct {
-		idx     int
-		score   float64
-		matched []string
-	}
-	var fired []scored
-	for i, r := range recs {
-		cueSet := tokenize(r.Cue)
-		var matched []string
-		for t := range cueSet {
-			if situationSet[t] {
-				matched = append(matched, t)
-			}
-		}
-		if len(matched) == 0 {
-			continue
-		}
-		sort.Strings(matched)
-		// salience grows with the encoded surprise weight and re-fire count
-		salience := r.Weight * (1 + math.Log(1+float64(r.Hits)))
-		fired = append(fired, scored{i, float64(len(matched)) * salience, matched})
-	}
+	fired := scoreRecords(recs, situation)
 	if len(fired) == 0 {
 		fmt.Fprintln(os.Stderr, "recoil: nothing fired (no cue overlap)")
 		return
 	}
-	sort.SliceStable(fired, func(a, b int) bool { return fired[a].score > fired[b].score })
 
 	n := *top
 	if n > len(fired) {
 		n = len(fired)
 	}
-	now := time.Now().Unix()
 	for k := 0; k < n; k++ {
 		f := fired[k]
 		r := recs[f.idx]
 		fmt.Printf(">> %s\n   [%s w=%g hits=%d] matched: %s\n",
 			r.Gist, r.Trigger, r.Weight, r.Hits, strings.Join(f.matched, " "))
-		recs[f.idx].Hits++  // recall reinforces — re-fired memories persist longer
+	}
+	reinforce(recs, fired[:n])
+}
+
+// reinforce bumps the hit count and last-seen time of the fired records and
+// saves. Kept separate from presentation so the ranking is testable without a
+// disk write as a side effect.
+func reinforce(recs []record, fired []scored) {
+	now := time.Now().Unix()
+	for _, f := range fired {
+		recs[f.idx].Hits++
 		recs[f.idx].Last = now
 	}
 	if err := saveRecords(recs); err != nil {
+		fmt.Fprintln(os.Stderr, "recoil:", err)
+	}
+}
+
+// cmdWatch runs a command and, if it fails, records the failure as a flinch: the
+// command, its error output, and the files in play become the cue, so next time
+// you are in a similar spot recoil can remind you it went wrong here. The
+// command's own exit code is passed through unchanged.
+func cmdWatch(args []string) {
+	if len(args) > 0 && args[0] == "--" {
+		args = args[1:]
+	}
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "recoil watch: usage: recoil watch -- <command> [args...]")
+		os.Exit(2)
+	}
+
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	var errBuf bytes.Buffer
+	cmd.Stderr = io.MultiWriter(os.Stderr, &errBuf)
+
+	code := 0
+	if err := cmd.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else {
+			fmt.Fprintln(os.Stderr, "recoil watch:", err)
+			os.Exit(127)
+		}
+	}
+	if code != 0 {
+		recordFailure(args, errBuf.String(), code)
+	}
+	os.Exit(code)
+}
+
+func recordFailure(cmdArgs []string, errOut string, code int) {
+	cmdLine := strings.Join(cmdArgs, " ")
+	cue := strings.Join(sortedTokens(tokenize(cmdLine+" "+errOut+" "+changedFiles())), " ")
+	gist := fmt.Sprintf("`%s` failed (exit %d): %s", cmdLine, code, firstLine(errOut))
+	now := time.Now().Unix()
+	r := record{
+		ID:      fmt.Sprintf("r%d", time.Now().UnixNano()),
+		Created: now,
+		Trigger: "error",
+		Weight:  triggerWeights["error"],
+		Hits:    0,
+		Last:    now,
+		Cue:     cue,
+		Gist:    gist,
+	}
+	if err := appendRecord(r); err != nil {
+		fmt.Fprintln(os.Stderr, "recoil:", err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "recoil: flinch recorded — %s\n", gist)
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "(no output)"
+	}
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	if len(s) > 200 {
+		s = s[:200]
+	}
+	return s
+}
+
+// changedFiles returns the names of files git reports as modified, best-effort.
+// Outside a git repo it returns "".
+func changedFiles() string {
+	out, err := exec.Command("git", "status", "--porcelain").Output()
+	if err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, line := range strings.Split(string(out), "\n") {
+		if len(line) > 3 {
+			b.WriteString(line[3:])
+			b.WriteByte(' ')
+		}
+	}
+	return b.String()
+}
+
+const postCommitHook = `#!/bin/sh
+# recoil: record reverts as flinches (installed by 'recoil hook --install')
+subject=$(git log -1 --pretty=%s)
+case "$subject" in
+  Revert*)
+    files=$(git diff-tree --no-commit-id --name-only -r HEAD | tr '\n' ' ')
+    recoil encode --trigger revert --gist "$subject" --cue "$subject $files"
+    ;;
+esac
+`
+
+func cmdHook(args []string) {
+	fs := flag.NewFlagSet("hook", flag.ExitOnError)
+	install := fs.Bool("install", false, "write the hook into the repo's git hooks dir")
+	fs.Parse(args)
+
+	if !*install {
+		os.Stdout.WriteString(postCommitHook)
+		return
+	}
+	out, err := exec.Command("git", "rev-parse", "--git-path", "hooks/post-commit").Output()
+	if err != nil {
+		die(fmt.Errorf("not a git repository (run this inside one): %w", err))
+	}
+	hookPath := strings.TrimSpace(string(out))
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
 		die(err)
 	}
+	if err := os.WriteFile(hookPath, []byte(postCommitHook), 0o755); err != nil {
+		die(err)
+	}
+	fmt.Printf("recoil: installed post-commit hook at %s\n", hookPath)
 }
 
 func cmdList(args []string) {

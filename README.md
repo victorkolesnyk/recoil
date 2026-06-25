@@ -1,70 +1,72 @@
 # recoil
 
-A local-first memory for AI coding agents. One static binary, one plain-text
-store, no embeddings, no model, no network.
+Memory for AI coding agents. It remembers the things that go wrong — a failed
+command, a revert, a correction — and reminds you when you're about to hit them
+again. One Go binary, a plain text file, no embeddings.
 
-
-
-- **It writes only on a critical.** A memory is recorded when the development loop
-  is *stagering* — a command errored, a test went red, a change got reverted, the
-  user corrected msg. Routine, unsurprising activity is not stored. Surprise is
-  the encode gate, and it comes from signals you already have (`$?`, `git`), not
-  from a model scoring text.
-- **It recalls by the present situation, deterministically.** A memory is a *cue*
-  (the files / error text / keywords it happened in) plus a *gist* (the lesson).
-  Recall matches the cue against what you're doing *now* with plain keyword
-  overlap — no embeddings — and fires the matching gists back. The situation
-  reminds you; you don't go looking by name.
-
-## Install
+## Build
 
 ```sh
-go build -o recoil .      # single static binary, stdlib only
+go build -o recoil .
 ```
+
+Stdlib only, so that's the whole build.
 
 ## Use
 
+Record a lesson with the situation it happened in:
+
 ```sh
-recoil init
-
-# remember something that surprised the loop
 recoil encode --trigger test-fail \
-  --gist "Don't name a Unity source folder Build/ — stock .gitignore untracks it." \
-  --cue  "unity build folder gitignore untracked source"
-
-# recall by the current situation (also reads piped stdin)
-echo "editing the .gitignore and a new Build directory in the unity project" | recoil recall
-recoil recall --situation "about to give the user a menu of options" --files src/foo.cs
+  --gist "Don't name a Unity folder Build/, .gitignore untracks it" \
+  --cue  "unity build folder gitignore"
 ```
 
-Recall fires the most salient matching gists. Salience grows with the encoded
-surprise weight and with how often a memory has been re-fired, so lessons that
-keep proving relevant stay loud.
+Later, recall by what you're doing now. Matching is plain keyword overlap, so an
+unrelated task gets nothing back:
+
+```
+$ echo "editing .gitignore and a new Build dir" | recoil recall
+>> Don't name a Unity folder Build/, .gitignore untracks it
+   [test-fail w=2 hits=0] matched: build gitignore unity
+```
+
+A lesson gets a little louder each time it's recalled, so the ones that keep
+mattering stay near the top.
+
+## Auto-capture
+
+Wrap a command. If it fails, recoil records it for you:
+
+```sh
+recoil watch -- go test ./...
+```
+
+Install a git hook to record reverts:
+
+```sh
+recoil hook --install
+```
+
+## Commands
+
+```
+recoil init                       create the store
+recoil encode --gist .. --cue ..  record a lesson
+recoil recall [--situation ..]    show matching lessons (also reads stdin)
+recoil watch -- <cmd>             run a command, record it if it fails
+recoil hook [--install]           git post-commit hook for reverts
+recoil list                       show everything stored
+```
+
+Triggers and their default weights: `correction` 3, `revert` 2.5, `test-fail` 2,
+`error` 1.5, `manual` 1. Higher weight means it surfaces sooner.
 
 ## Store
 
-Plain TSV at `$RECOIL_DIR/store.tsv` (default `./.recoil/store.tsv`): one record
-per line, `id  created  trigger  weight  hits  last  cue  gist`. Greppable by
-design — the memory is text you can read and edit, not an opaque index.
-
-## Triggers and default weights
-
-| trigger      | weight | when |
-|--------------|:------:|------|
-| `correction` | 3.0    | the user said "no, that's wrong" |
-| `revert`     | 2.5    | a change was reverted / rolled back |
-| `test-fail`  | 2.0    | a test went red (then green) |
-| `error`      | 1.5    | a command/tool errored |
-| `manual`     | 1.0    | recorded by hand |
-
-## Roadmap
-
-- **Auto-capture** — a git hook + a command wrapper that detect the flinch
-  (non-zero exit, `git revert`, red→green test, user correction) and call
-  `recoil encode` with no manual step.
-- **Decay** — memories never re-fired fade; surprise-born, re-fired ones persist.
-- **Pre-action fire** — warn *before* repeating a known-bad action, not just on
-  request.
+Plain TSV at `$RECOIL_DIR/store.tsv` (default `./.recoil/store.tsv`), one line
+per lesson: `id  created  trigger  weight  hits  last  cue  gist`. You can read
+it and edit it.
 
 ## License
 

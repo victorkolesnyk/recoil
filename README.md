@@ -69,6 +69,9 @@ recoil guard --files src/foo.go
 # recoil: been burned here before — Assert.ThrowsAsync hangs the EditMode runner
 ```
 
+A warning needs at least two overlapping cue tokens by default (`--min-overlap`),
+so one coincidental shared word won't trip it.
+
 With no arguments in a git repo it checks your staged files, so it runs as a
 pre-commit hook. Wire up both hooks — the pre-commit guard and the post-commit
 revert recorder — with one command (it won't overwrite hooks you already have):

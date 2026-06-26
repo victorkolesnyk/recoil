@@ -111,7 +111,7 @@ func TestGuardWarnsOnBurnsNotNotes(t *testing.T) {
 		{Trigger: "error", Weight: 1.5, Cue: "build gitignore", Last: now},
 		{Trigger: "manual", Weight: 1, Cue: "build gitignore", Last: now}, // a plain note — no warning
 	}
-	got := guardMatches(recs, tokenize("touching build and gitignore"), now, defaultHalfLifeDays, defaultGuardMin)
+	got := guardMatches(recs, tokenize("touching build and gitignore"), now, defaultHalfLifeDays, defaultGuardMin, defaultGuardOverlap)
 	if len(got) != 1 || got[0].Trigger != "error" {
 		t.Fatalf("guard should warn only on the error memory, got %+v", got)
 	}
@@ -122,7 +122,23 @@ func TestGuardSkipsFadedMemories(t *testing.T) {
 	recs := []record{
 		{Trigger: "error", Weight: 1.5, Cue: "alpha", Last: now - 365*day}, // faded below the guard floor
 	}
-	if got := guardMatches(recs, tokenize("alpha"), now, defaultHalfLifeDays, defaultGuardMin); len(got) != 0 {
+	if got := guardMatches(recs, tokenize("alpha"), now, defaultHalfLifeDays, defaultGuardMin, 1); len(got) != 0 {
 		t.Errorf("a faded memory should not warn, got %+v", got)
+	}
+}
+
+func TestGuardRequiresMinOverlap(t *testing.T) {
+	const now = int64(0)
+	recs := []record{
+		{Trigger: "error", Weight: 3, Cue: "alpha beta gamma", Last: now},
+	}
+	// one token overlaps — at min-overlap 2 it must not warn (kills the
+	// "one coincidental shared token" false positive)
+	if got := guardMatches(recs, tokenize("alpha only"), now, defaultHalfLifeDays, defaultGuardMin, 2); len(got) != 0 {
+		t.Errorf("single-token overlap should not warn at min-overlap 2, got %+v", got)
+	}
+	// two tokens overlap — it should warn
+	if got := guardMatches(recs, tokenize("alpha and beta here"), now, defaultHalfLifeDays, defaultGuardMin, 2); len(got) != 1 {
+		t.Errorf("two-token overlap should warn at min-overlap 2, got %+v", got)
 	}
 }

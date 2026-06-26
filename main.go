@@ -25,7 +25,7 @@ import (
 	"time"
 )
 
-const version = "0.4.0"
+const version = "0.4.1"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -65,7 +65,7 @@ usage:
   recoil encode --gist "<lesson>" --cue "<tokens>" [--trigger T] [--weight N]
   recoil recall [--situation "<text>"] [--files a,b] [--top N]   (also reads stdin)
   recoil decay [--floor F] [--half-life D] [--dry-run]    forget faded memories
-  recoil guard [--files a,b] [--situation "<text>"] [--block]    warn before a known-bad change
+  recoil guard [--files a,b] [--situation "<text>"] [--min-overlap N] [--block]    warn before a known-bad change
   recoil watch -- <command> [args...]    run a command; remember it if it fails
   recoil hook [--install]                git pre/post-commit hooks (warn, record reverts)
   recoil list
@@ -260,6 +260,7 @@ const (
 	defaultHalfLifeDays = 30.0 // a memory loses half its strength every 30 unused days
 	defaultFloor        = 0.1  // decay forgets memories whose strength falls below this
 	defaultGuardMin     = 0.5  // guard warns only on memories at least this strong
+	defaultGuardOverlap = 2    // guard warns only when at least this many cue tokens overlap
 )
 
 func halfLifeDays() float64 {
@@ -328,14 +329,19 @@ func partitionDecay(recs []record, now int64, floor, halfLife float64) (keep, fo
 }
 
 // guardMatches returns the surprise-born memories (not plain notes) that overlap
-// the situation and are still strong enough to warn about — the "you've been
-// here before" set, most relevant first.
-func guardMatches(recs []record, situation map[string]bool, now int64, halfLife, minStrength float64) []record {
+// the situation on at least minOverlap cue tokens and are still strong enough to
+// warn about — the "you've been here before" set, most relevant first. The
+// overlap floor keeps a single coincidental shared token (e.g. "unity" across a
+// whole domain's lessons) from firing a false warning.
+func guardMatches(recs []record, situation map[string]bool, now int64, halfLife, minStrength float64, minOverlap int) []record {
 	var out []record
 	for _, f := range scoreRecords(recs, situation, now, halfLife) {
 		r := recs[f.idx]
 		if r.Trigger == "manual" {
 			continue // guard is about things that went wrong, not plain notes
+		}
+		if len(f.matched) < minOverlap {
+			continue // too little shared context — likely a coincidental token
 		}
 		if strength(r, now, halfLife) < minStrength {
 			continue
@@ -485,6 +491,7 @@ func cmdGuard(args []string) {
 	files := fs.String("files", "", "comma-separated files you're about to change")
 	situationFlag := fs.String("situation", "", "describe what you're about to do")
 	minStrength := fs.Float64("min-strength", defaultGuardMin, "only warn on memories at least this strong")
+	minOverlap := fs.Int("min-overlap", defaultGuardOverlap, "only warn when at least this many cue tokens overlap")
 	block := fs.Bool("block", false, "exit non-zero if a warning fires (abort the action)")
 	fs.Parse(args)
 
@@ -496,7 +503,7 @@ func cmdGuard(args []string) {
 	if err != nil {
 		die(err)
 	}
-	warnings := guardMatches(recs, situation, time.Now().Unix(), halfLifeDays(), *minStrength)
+	warnings := guardMatches(recs, situation, time.Now().Unix(), halfLifeDays(), *minStrength, *minOverlap)
 	for _, r := range warnings {
 		fmt.Fprintf(os.Stderr, "recoil: been burned here before — %s\n", r.Gist)
 	}

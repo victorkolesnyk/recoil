@@ -114,7 +114,7 @@ unrelated task gets nothing back:
 ```
 $ echo "editing .gitignore and a new Build dir" | recoil recall
 >> Don't name a Unity folder Build/, .gitignore untracks it
-   [test-fail w=2 hits=0] matched: build gitignore unity
+   [test-fail w=2 hits=0] matched: build gitignore
 ```
 
 A lesson gets a little louder each time it's recalled, so the ones that keep

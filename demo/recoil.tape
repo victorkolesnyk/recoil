@@ -22,6 +22,6 @@ Type `echo "editing .gitignore and a new Build dir" | recoil recall`
 Enter
 Sleep 2500ms
 
-Type "recoil guard --files .gitignore"
+Type "recoil guard --files Build/Player.cs,.gitignore"
 Enter
 Sleep 2500ms

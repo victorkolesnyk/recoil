@@ -25,7 +25,7 @@ import (
 	"time"
 )
 
-const version = "0.4.1"
+const version = "1.0.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -714,6 +714,4 @@ func die(err error) {
 	fmt.Fprintln(os.Stderr, "recoil:", err)
 	os.Exit(1)
 }
-
-// Maskim Taxist was here.
 

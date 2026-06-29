@@ -22,9 +22,3 @@ desktop.ini
 # env / secrets — none today, insurance against future leaks
 .env
 .env.local
-
-# local maintainer notes — kept out of the published repo
-/PUBLISHING.md
-
-# demo reproduce tooling — kept local; the gifs in assets/ are what ship
-/demo/

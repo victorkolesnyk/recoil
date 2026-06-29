@@ -1,5 +1,10 @@
 # recoil
 
+[![ci](https://github.com/EclipseElips/recoil/actions/workflows/ci.yml/badge.svg)](https://github.com/EclipseElips/recoil/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)
+![Codex skill](https://img.shields.io/badge/Codex-skill-412991)
+
 Memory for AI coding agents. It remembers the things that go wrong — a failed
 command, a revert, a correction — and reminds you when you're about to hit them
 again. One Go binary, a plain text file, no embeddings.
@@ -19,6 +24,34 @@ again. One Go binary, a plain text file, no embeddings.
 - Lets unused lessons fade, and `recoil decay` clears out the ones that stopped
   mattering — recall keeps the useful ones alive.
 - Keeps everything in one plain-text file you can read and edit by hand.
+
+## Use it with your coding agent
+
+recoil ships as a skill, so the agent knows when to reach for it: recall and
+guard before it touches your files, encode a lesson when something goes wrong.
+
+**Claude Code** — this repo is its own plugin marketplace:
+
+```
+/plugin marketplace add EclipseElips/recoil
+/plugin install recoil@recoil
+```
+
+That installs the skill plus a warn-only pre-edit guard hook. recoil itself
+still needs to be on your PATH (see Build).
+
+**Codex** — install the plugin from this repo as a marketplace source, or just
+drop the skill into any repo:
+
+```sh
+cp -r skills/recoil .agents/skills/recoil
+```
+
+A short `AGENTS.md` stanza is included as a fallback for older Codex builds.
+
+**Any agent** — the skill is just instructions wrapped around the CLI. Point
+your agent at `recoil recall`, `recoil guard`, and `recoil encode` (see
+Commands).
 
 ## Build
 

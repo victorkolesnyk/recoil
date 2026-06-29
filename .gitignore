@@ -9,3 +9,19 @@
 # go
 *.test
 *.out
+
+# os / editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*~
+
+# env / secrets — none today, insurance against future leaks
+.env
+.env.local
+
+# local maintainer notes — kept out of the published repo
+/PUBLISHING.md

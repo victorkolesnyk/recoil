@@ -6,39 +6,85 @@
 ![Codex skill](https://img.shields.io/badge/Codex-skill-412991)
 
 Memory for AI coding agents. It remembers the things that go wrong — a failed
-command, a revert, a correction — and reminds you when you're about to hit them
-again. One Go binary, a plain text file, no embeddings.
+command, a revert, a correction — and reminds your agent when it's about to hit
+them again. One Go binary, a plain text file, no embeddings.
+
+<!--
+Demo: record it with `vhs demo/recoil.tape` (writes assets/demo.gif), then
+commit the gif and uncomment the next line.
+![recoil recall and guard, in the terminal](assets/demo.gif)
+-->
 
 ## What it does
 
 - Remembers a lesson tied to the situation it happened in — the files, the error
   text, the keywords around it.
-- Brings that lesson back when you're in a similar situation again, matched by
-  plain keyword overlap (an unrelated task gets nothing).
-- Records failures for you: `recoil watch -- <cmd>` remembers anything that exits
-  non-zero, no manual step.
-- Records git reverts for you, via a post-commit hook.
-- Warns you before you repeat a known-bad change — a git pre-commit hook that
-  flags when you're touching something that bit you before.
+- Brings that lesson back when your agent is in a similar situation again, matched
+  by plain keyword overlap (an unrelated task gets nothing).
+- Records failures automatically: `recoil watch -- <cmd>` remembers anything that
+  exits non-zero, no manual step.
+- Records git reverts automatically, via a post-commit hook.
+- Warns the agent before it repeats a known-bad change — a git pre-commit hook
+  that flags when a change touches something that went wrong here before.
 - Surfaces the lessons that keep mattering — each recall makes one a little louder.
 - Lets unused lessons fade, and `recoil decay` clears out the ones that stopped
   mattering — recall keeps the useful ones alive.
 - Keeps everything in one plain-text file you can read and edit by hand.
+
+## Install
+
+recoil is a single binary that needs to be on your `PATH`. No Go toolchain needed
+for the prebuilt builds:
+
+```sh
+curl -sSfL https://raw.githubusercontent.com/EclipseElips/recoil/main/install.sh | sh -s -- -b /usr/local/bin
+```
+
+Or download an archive for your platform from the
+[releases page](https://github.com/EclipseElips/recoil/releases).
+
+With a Go toolchain:
+
+```sh
+go install github.com/EclipseElips/recoil@latest
+```
+
+From source — stdlib only, so that's the whole build:
+
+```sh
+go build -o recoil .
+```
+
+Then create the store, once per repo:
+
+```sh
+recoil init
+```
 
 ## Use it with your coding agent
 
 recoil ships as a skill, so the agent knows when to reach for it: recall and
 guard before it touches your files, encode a lesson when something goes wrong.
 
-**Claude Code** — this repo is its own plugin marketplace:
+**Claude Code** — recoil is submitted to Anthropic's community plugin directory.
+Once it's listed there:
+
+```
+/plugin marketplace add anthropics/claude-plugins-community
+/plugin install recoil@claude-community
+```
+
+Until then — or to install straight from this repo — add it as its own
+marketplace:
 
 ```
 /plugin marketplace add EclipseElips/recoil
 /plugin install recoil@recoil
 ```
 
-That installs the skill plus a warn-only pre-edit guard hook. recoil itself
-still needs to be on your PATH (see Build).
+Either way you get the skill plus a warn-only pre-edit guard hook. The recoil
+binary itself still needs to be on your `PATH` (see Install). Update later from
+the **Marketplaces** tab in `/plugin`.
 
 **Codex** — install the plugin from this repo as a marketplace source, or just
 drop the skill into any repo:
@@ -49,17 +95,8 @@ cp -r skills/recoil .agents/skills/recoil
 
 A short `AGENTS.md` stanza is included as a fallback for older Codex builds.
 
-**Any agent** — the skill is just instructions wrapped around the CLI. Point
-your agent at `recoil recall`, `recoil guard`, and `recoil encode` (see
-Commands).
-
-## Build
-
-```sh
-go build -o recoil .
-```
-
-Stdlib only, so that's the whole build.
+**Any agent** — the skill is just instructions wrapped around the CLI. Point your
+agent at `recoil recall`, `recoil guard`, and `recoil encode` (see Commands).
 
 ## Use
 
@@ -85,17 +122,17 @@ mattering stay near the top.
 
 ## Auto-capture
 
-Wrap a command. If it fails, recoil records it for you:
+Wrap a command. If it fails, recoil records it:
 
 ```sh
 recoil watch -- go test ./...
 ```
 
-## Warn before you repeat it
+## Warn before repeating it
 
-`recoil guard` checks what you're about to change against the things that went
-wrong before — errors, reverts, corrections, not plain notes — and warns you if
-you're walking back into one:
+`recoil guard` checks what's about to change against the things that went wrong
+before — errors, reverts, corrections, not plain notes — and warns if a change is
+walking back into one:
 
 ```sh
 recoil guard --files src/foo.go
@@ -105,7 +142,7 @@ recoil guard --files src/foo.go
 A warning needs at least two overlapping cue tokens by default (`--min-overlap`),
 so one coincidental shared word won't trip it.
 
-With no arguments in a git repo it checks your staged files, so it runs as a
+With no arguments in a git repo it checks the staged files, so it runs as a
 pre-commit hook. Wire up both hooks — the pre-commit guard and the post-commit
 revert recorder — with one command (it won't overwrite hooks you already have):
 
@@ -132,7 +169,7 @@ recoil decay              # forget it
 recoil init                       create the store
 recoil encode --gist .. --cue ..  record a lesson
 recoil recall [--situation ..]    show matching lessons (also reads stdin)
-recoil guard [--files a,b]        warn if you're repeating a known-bad change
+recoil guard [--files a,b]        warn if a change repeats a known-bad one
 recoil decay [--dry-run]          forget lessons that have faded
 recoil watch -- <cmd>             run a command, record it if it fails
 recoil hook [--install]           git pre/post-commit hooks (warn, record reverts)
@@ -150,4 +187,5 @@ it and edit it.
 
 ## License
 
-MIT.
+MIT. Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). To report a
+security issue, see [SECURITY.md](SECURITY.md).

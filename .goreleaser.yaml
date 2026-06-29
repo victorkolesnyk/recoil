@@ -1,0 +1,45 @@
+# GoReleaser builds the prebuilt binaries for a tagged release.
+# Locally:  goreleaser check   and   goreleaser release --snapshot --clean
+# Docs:     https://goreleaser.com
+version: 2
+
+project_name: recoil
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: recoil
+    main: .
+    binary: recoil
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    # Stamp the version from the git tag into main.version.
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: recoil
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  draft: false
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"

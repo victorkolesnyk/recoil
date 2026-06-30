@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -324,6 +325,17 @@ func TestProjectStorePathDefaultsWhenNoProjectSet(t *testing.T) {
 // --- file permissions (security regression guard) ---
 
 func TestAppendRecordCreatesRestrictivePermissions(t *testing.T) {
+	// Windows has no Unix-style group/other permission bits — os.OpenFile's
+	// mode argument only controls the read-only attribute there (per the
+	// Go os package docs: "only the 0200 bit ... is used; it controls
+	// whether the file's read-only attribute is set"). Group/other
+	// restriction on Windows works through NTFS ACLs, not chmod-style bits,
+	// so this check is meaningful only on Unix-like systems.
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits (group/other) are not enforced by os.OpenFile mode on Windows; " +
+			"access restriction there relies on NTFS ACLs, which this test does not cover")
+	}
+
 	old := os.Getenv("RECOIL_DIR")
 	dir := t.TempDir()
 	os.Setenv("RECOIL_DIR", dir)

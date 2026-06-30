@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -265,10 +266,10 @@ func TestProjectIsolationKeepsStoresSeparate(t *testing.T) {
 	dir := t.TempDir()
 	os.Setenv("RECOIL_DIR", dir)
 	defer os.Setenv("RECOIL_DIR", old)
-	defer func() { activeProject = "" }()
+	defer func() { session.activeProject = "" }()
 
 	// Project A: write a lesson
-	activeProject = "project-a"
+	session.activeProject = "project-a"
 	if err := os.MkdirAll(projectStoreDir(), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +279,7 @@ func TestProjectIsolationKeepsStoresSeparate(t *testing.T) {
 	}
 
 	// Project B: should see nothing from A
-	activeProject = "project-b"
+	session.activeProject = "project-b"
 	if err := os.MkdirAll(projectStoreDir(), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +292,7 @@ func TestProjectIsolationKeepsStoresSeparate(t *testing.T) {
 	}
 
 	// Back to A: lesson must still be there
-	activeProject = "project-a"
+	session.activeProject = "project-a"
 	recsA, err := mcpLoadRecords()
 	if err != nil {
 		t.Fatal(err)
@@ -313,9 +314,9 @@ func TestProjectStorePathDefaultsWhenNoProjectSet(t *testing.T) {
 	dir := t.TempDir()
 	os.Setenv("RECOIL_DIR", dir)
 	defer os.Setenv("RECOIL_DIR", old)
-	defer func() { activeProject = "" }()
+	defer func() { session.activeProject = "" }()
 
-	activeProject = ""
+	session.activeProject = ""
 	got := projectStoreDir()
 	if got != storeDir() {
 		t.Errorf("with no active project, projectStoreDir() should equal storeDir(); got %q vs %q", got, storeDir())
@@ -340,9 +341,9 @@ func TestAppendRecordCreatesRestrictivePermissions(t *testing.T) {
 	dir := t.TempDir()
 	os.Setenv("RECOIL_DIR", dir)
 	defer os.Setenv("RECOIL_DIR", old)
-	defer func() { activeProject = "" }()
+	defer func() { session.activeProject = "" }()
 
-	activeProject = "perm-test"
+	session.activeProject = "perm-test"
 	r := record{ID: "p1", Created: 1, Trigger: "manual", Weight: 1, Cue: "x", Gist: "y"}
 	if err := mcpAppendRecord(r); err != nil {
 		t.Fatal(err)
@@ -356,5 +357,172 @@ func TestAppendRecordCreatesRestrictivePermissions(t *testing.T) {
 	// Expect owner read/write only — group/other must have zero bits
 	if mode&0o077 != 0 {
 		t.Errorf("store.tsv has overly permissive mode %o, want owner-only (0600-class)", mode)
+	}
+}
+
+// --- dispatch() — the JSON-RPC routing layer ---
+//
+// This is the part of the MCP server that talks directly to Claude Desktop
+// and other clients. A bug here (e.g. responding to a notification that
+// should get silence) breaks the connection in ways that are hard to
+// diagnose from the client side — exactly what happened with
+// notifications/initialized before this test existed.
+
+func rawID(v any) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return json.RawMessage(b)
+}
+
+func TestDispatchInitializeReturnsServerInfo(t *testing.T) {
+	resp := dispatch(rpcRequest{
+		JSONRPC: "2.0",
+		ID:      rawID(1),
+		Method:  "initialize",
+	})
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T", resp.Result)
+	}
+	if result["protocolVersion"] != "2024-11-05" {
+		t.Errorf("unexpected protocolVersion: %v", result["protocolVersion"])
+	}
+	info, ok := result["serverInfo"].(map[string]any)
+	if !ok || info["name"] != "recoil" {
+		t.Errorf("expected serverInfo.name = recoil, got %+v", result["serverInfo"])
+	}
+}
+
+func TestDispatchNotificationsGetNoResponse(t *testing.T) {
+	// This is the exact case that broke against a real Claude Desktop client:
+	// notifications carry no "id" and must receive absolute silence, not an
+	// error response. A non-empty rpcResponse here is itself the failure —
+	// any JSONRPC field at all means something would be written to stdout.
+	cases := []string{
+		"notifications/initialized",
+		"notifications/cancelled",
+		"notifications/anything_future_clients_might_send",
+	}
+	for _, method := range cases {
+		resp := dispatch(rpcRequest{JSONRPC: "2.0", Method: method})
+		if resp.JSONRPC != "" || resp.Result != nil || resp.Error != nil {
+			t.Errorf("method %q: expected empty response (no id present), got %+v", method, resp)
+		}
+	}
+}
+
+func TestDispatchLegacyInitializedStillSilent(t *testing.T) {
+	// Some older or non-standard clients may send "initialized" without the
+	// notifications/ prefix. Backward-compat case — same silence expected.
+	resp := dispatch(rpcRequest{JSONRPC: "2.0", Method: "initialized"})
+	if resp.JSONRPC != "" || resp.Result != nil || resp.Error != nil {
+		t.Errorf("expected empty response for legacy 'initialized', got %+v", resp)
+	}
+}
+
+func TestDispatchToolsListIncludesAllFiveTools(t *testing.T) {
+	resp := dispatch(rpcRequest{JSONRPC: "2.0", ID: rawID(2), Method: "tools/list"})
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %T", resp.Result)
+	}
+	tools, ok := result["tools"].([]mcpToolDef)
+	if !ok {
+		t.Fatalf("expected []mcpToolDef, got %T", result["tools"])
+	}
+	want := map[string]bool{
+		"recoil_project": false, "recoil_recall": false, "recoil_encode": false,
+		"recoil_guard": false, "recoil_analyse": false,
+	}
+	for _, tool := range tools {
+		want[tool.Name] = true
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("expected tool %q in tools/list response", name)
+		}
+	}
+}
+
+func TestDispatchToolsCallRoutesToCorrectHandler(t *testing.T) {
+	old := os.Getenv("RECOIL_DIR")
+	dir := t.TempDir()
+	os.Setenv("RECOIL_DIR", dir)
+	defer os.Setenv("RECOIL_DIR", old)
+	defer func() { session.activeProject = "" }()
+
+	params, _ := json.Marshal(struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}{
+		Name:      "recoil_project",
+		Arguments: json.RawMessage(`{"action":"set","name":"dispatch-test"}`),
+	})
+
+	resp := dispatch(rpcRequest{JSONRPC: "2.0", ID: rawID(3), Method: "tools/call", Params: params})
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	result, ok := resp.Result.(mcpToolResult)
+	if !ok {
+		t.Fatalf("expected mcpToolResult, got %T", resp.Result)
+	}
+	if result.IsError {
+		t.Errorf("expected success, got error result: %+v", result)
+	}
+	if session.activeProject != "dispatch-test" {
+		t.Errorf("expected dispatch to route through to handleProject and set the project, got %q", session.activeProject)
+	}
+}
+
+func TestDispatchUnknownToolReturnsError(t *testing.T) {
+	params, _ := json.Marshal(struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}{Name: "recoil_does_not_exist"})
+
+	resp := dispatch(rpcRequest{JSONRPC: "2.0", ID: rawID(4), Method: "tools/call", Params: params})
+	if resp.Error == nil {
+		t.Fatal("expected error for unknown tool name, got nil")
+	}
+}
+
+func TestDispatchUnknownMethodReturnsError(t *testing.T) {
+	resp := dispatch(rpcRequest{JSONRPC: "2.0", ID: rawID(5), Method: "totally/unknown/method"})
+	if resp.Error == nil {
+		t.Fatal("expected error for unknown method, got nil")
+	}
+}
+
+func TestDispatchMalformedToolCallParamsReturnsError(t *testing.T) {
+	resp := dispatch(rpcRequest{
+		JSONRPC: "2.0", ID: rawID(6), Method: "tools/call",
+		Params: json.RawMessage(`{not valid json`),
+	})
+	if resp.Error == nil {
+		t.Fatal("expected error for malformed params, got nil")
+	}
+}
+
+func TestDispatchResponseAlwaysEchoesRequestID(t *testing.T) {
+	// The MCP/JSON-RPC contract requires the response id to match the
+	// request id exactly — string ids and numeric ids both need to survive
+	// the round trip unchanged, since clients match responses to requests by id.
+	for _, id := range []any{1, "string-id", 0} {
+		resp := dispatch(rpcRequest{JSONRPC: "2.0", ID: rawID(id), Method: "initialize"})
+		var got any
+		if err := json.Unmarshal(resp.ID, &got); err != nil {
+			t.Fatalf("id %v: response id is not valid JSON: %v", id, err)
+		}
+		wantJSON, _ := json.Marshal(id)
+		gotJSON, _ := json.Marshal(got)
+		if string(wantJSON) != string(gotJSON) {
+			t.Errorf("id %v: response id mismatch, got %s", id, gotJSON)
+		}
 	}
 }

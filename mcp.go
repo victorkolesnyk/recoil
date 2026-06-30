@@ -29,11 +29,18 @@ import (
 	"unicode/utf8"
 )
 
-// activeProject holds the current project name for this MCP server session.
-// Empty string means "use RECOIL_DIR as-is" (default behaviour, backward compatible).
-// Set via recoil_project tool. Scoped to the process — each Claude Desktop session
-// gets its own server process, so projects are naturally session-isolated.
-var activeProject = ""
+// session holds per-server state for the lifetime of one `recoil serve --mcp`
+// process. There is exactly one of these per process, and stdio MCP servers
+// process one JSON-RPC line at a time on a single goroutine — so this is not
+// a concurrency hazard in practice. It's still package state rather than a
+// value threaded through every handler; that's a deliberate scope-limiting
+// choice (the alternative is a project parameter on all five handleX
+// functions and everything they call), not an oversight. If recoil ever
+// serves multiple concurrent clients from one process, this needs to become
+// a per-connection value instead.
+var session struct {
+	activeProject string
+}
 
 // --- Security constants ---
 
@@ -177,10 +184,10 @@ func sanitiseText(s string) string {
 //          <RECOIL_DIR>/             when no project (default)
 func projectStoreDir() string {
 	base := storeDir()
-	if activeProject == "" {
+	if session.activeProject == "" {
 		return base
 	}
-	return filepath.Join(base, activeProject)
+	return filepath.Join(base, session.activeProject)
 }
 
 // projectStorePath returns store.tsv inside the active project directory.
@@ -255,76 +262,27 @@ type mcpContent struct {
 	Text string `json:"text"`
 }
 
-// --- Project-aware store access (MCP layer overrides path from main.go) ---
+// --- Project-aware store access ---
+//
+// These wrap the same load/save/append functions main.go's CLI commands use,
+// just pointed at the active project's path instead of the default store.
+// No copy of the file-handling logic lives here — one read path, one write
+// path, for both the CLI and the MCP server.
 
-// mcpLoadRecords loads records from the active project store.
+const mcpStorePerm = 0o600 // owner read/write only — see os.OpenFile docs re: Windows
+
 func mcpLoadRecords() ([]record, error) {
-	f, err := os.Open(projectStorePath())
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer f.Close()
-
-	var recs []record
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		line := sc.Text()
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		if r, ok := parseRecord(line); ok {
-			recs = append(recs, r)
-		}
-	}
-	return recs, sc.Err()
+	return loadRecords(projectStorePath())
 }
 
-// mcpAppendRecord appends a record to the active project store,
-// creating the directory if needed.
 func mcpAppendRecord(r record) error {
-	if err := os.MkdirAll(projectStoreDir(), 0o700); err != nil { // 0700 = owner only
-		return err
-	}
-	f, err := os.OpenFile(projectStorePath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) // 0600 = owner read/write only
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = fmt.Fprintln(f, r.tsv())
-	return err
+	return appendRecord(projectStoreDir(), 0o700, projectStorePath(), mcpStorePerm, r)
 }
 
-// mcpSaveRecords rewrites the active project store atomically (used by reinforce).
 func mcpSaveRecords(recs []record) error {
-	if err := os.MkdirAll(projectStoreDir(), 0o700); err != nil {
-		return err
-	}
-	tmp := projectStorePath() + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	w := bufio.NewWriter(f)
-	for _, rec := range recs {
-		fmt.Fprintln(w, rec.tsv())
-	}
-	if err := w.Flush(); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, projectStorePath())
+	return saveRecords(projectStoreDir(), 0o700, projectStorePath(), recs)
 }
 
-// mcpReinforce bumps hit count and last-seen for fired records, project-aware.
 func mcpReinforce(recs []record, fired []scored) {
 	now := time.Now().Unix()
 	for _, f := range fired {
@@ -469,7 +427,7 @@ func handleProject(params json.RawMessage) mcpToolResult {
 		if errMsg != "" {
 			return errResult(errMsg)
 		}
-		activeProject = clean
+		session.activeProject = clean
 		// Auto-create store directory with restrictive permissions
 		if err := os.MkdirAll(projectStoreDir(), 0o700); err != nil {
 			return errResult("could not create project directory: " + err.Error())
@@ -484,11 +442,11 @@ func handleProject(params json.RawMessage) mcpToolResult {
 		}
 		return okResult(fmt.Sprintf(
 			"✅ Active project: %s\n🔒 Store: %s\n🔒 All data is local — nothing leaves this machine.",
-			activeProject, projectStorePath(),
+			session.activeProject, projectStorePath(),
 		))
 
 	case "current":
-		if activeProject == "" {
+		if session.activeProject == "" {
 			return okResult(fmt.Sprintf(
 				"No project set. Using default store: %s\n\n"+
 					"Tip: call recoil_project with action=set and a project name to isolate memory.\n"+
@@ -499,7 +457,7 @@ func handleProject(params json.RawMessage) mcpToolResult {
 		recs, _ := mcpLoadRecords()
 		return okResult(fmt.Sprintf(
 			"Active project: %s\n🔒 Store: %s\nLessons stored: %d\n🔒 All data is local — nothing leaves this machine.",
-			activeProject, projectStorePath(), len(recs),
+			session.activeProject, projectStorePath(), len(recs),
 		))
 
 	case "list":
@@ -514,7 +472,7 @@ func handleProject(params json.RawMessage) mcpToolResult {
 		sb.WriteString(fmt.Sprintf("Found %d project(s):\n\n", len(projects)))
 		for _, name := range projects {
 			marker := "  "
-			if name == activeProject {
+			if name == session.activeProject {
 				marker = "▶ "
 			}
 			tsv := filepath.Join(storeDir(), name, "store.tsv")
@@ -530,10 +488,10 @@ func handleProject(params json.RawMessage) mcpToolResult {
 			}
 			sb.WriteString(fmt.Sprintf("%s%s  (%d lessons)\n", marker, name, count))
 		}
-		if activeProject == "" {
+		if session.activeProject == "" {
 			sb.WriteString("\nNo project active. Use action=set to activate one.")
 		} else {
-			sb.WriteString(fmt.Sprintf("\nActive: %s", activeProject))
+			sb.WriteString(fmt.Sprintf("\nActive: %s", session.activeProject))
 		}
 		sb.WriteString("\n🔒 All data is local — nothing leaves this machine.")
 		return okResult(sb.String())
@@ -578,7 +536,7 @@ func handleRecall(params json.RawMessage) mcpToolResult {
 	}
 
 	var sb strings.Builder
-	proj := activeProject
+	proj := session.activeProject
 	if proj == "" {
 		proj = "default"
 	}
@@ -674,7 +632,7 @@ func handleEncode(params json.RawMessage) mcpToolResult {
 		return errResult("could not save lesson: " + err.Error())
 	}
 
-	proj := activeProject
+	proj := session.activeProject
 	if proj == "" {
 		proj = "default"
 	}
@@ -824,7 +782,7 @@ func handleAnalyse(params json.RawMessage) mcpToolResult {
 		}
 	}
 
-	proj := activeProject
+	proj := session.activeProject
 	if proj == "" {
 		proj = "default"
 	}
@@ -1011,6 +969,13 @@ func cmdServeMCP() {
 }
 
 func dispatch(req rpcRequest) rpcResponse {
+	// JSON-RPC notifications never carry an "id" and never receive a response —
+	// this covers notifications/initialized, notifications/cancelled, and any
+	// future notification type, rather than hardcoding one method name.
+	if req.ID == nil && strings.HasPrefix(req.Method, "notifications/") {
+		return rpcResponse{}
+	}
+
 	base := rpcResponse{JSONRPC: "2.0", ID: req.ID}
 
 	switch req.Method {
@@ -1027,8 +992,8 @@ func dispatch(req rpcRequest) rpcResponse {
 			},
 		}
 
-	case "initialized":
-		return rpcResponse{} // notification — no response
+	case "initialized", "notifications/initialized":
+		return rpcResponse{} // kept for backward compatibility with older clients
 
 	case "tools/list":
 		base.Result = map[string]any{"tools": mcpTools}

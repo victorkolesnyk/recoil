@@ -147,8 +147,11 @@ func parseRecord(line string) (record, bool) {
 	}, true
 }
 
-func loadRecords() ([]record, error) {
-	f, err := os.Open(storePath())
+// loadRecords reads all records from the store at the given path.
+// Pass storePath() for the default CLI store, or a project-specific path
+// for the MCP server's per-project isolation.
+func loadRecords(path string) ([]record, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -173,16 +176,18 @@ func loadRecords() ([]record, error) {
 		}
 	}
 	if skipped > 0 {
-		fmt.Fprintf(os.Stderr, "recoil: warning: skipped %d malformed line(s) in %s\n", skipped, storePath())
+		fmt.Fprintf(os.Stderr, "recoil: warning: skipped %d malformed line(s) in %s\n", skipped, path)
 	}
 	return recs, sc.Err()
 }
 
-func saveRecords(recs []record) error {
-	if err := os.MkdirAll(storeDir(), 0o755); err != nil {
+// saveRecords atomically rewrites the store at the given path. dirPerm
+// controls the containing directory's permissions if it needs creating.
+func saveRecords(dir string, dirPerm os.FileMode, path string, recs []record) error {
+	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return err
 	}
-	tmp := storePath() + ".tmp"
+	tmp := path + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
 		return err
@@ -193,19 +198,26 @@ func saveRecords(recs []record) error {
 	}
 	if err := w.Flush(); err != nil {
 		f.Close()
+		os.Remove(tmp)
 		return err
 	}
 	if err := f.Close(); err != nil {
+		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, storePath())
+	return os.Rename(tmp, path)
 }
 
-func appendRecord(r record) error {
-	if err := os.MkdirAll(storeDir(), 0o755); err != nil {
+// appendRecord adds one record to the store at the given path, creating the
+// directory if needed. dirPerm/filePerm let callers choose stricter
+// permissions: the default CLI store uses 0o755/0o644 (shared, readable);
+// MCP project stores use 0o700/0o600 (owner-only — see the os.OpenFile docs
+// for the Windows caveat on this).
+func appendRecord(dir string, dirPerm os.FileMode, path string, filePerm os.FileMode, r record) error {
+	if err := os.MkdirAll(dir, dirPerm); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(storePath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, filePerm)
 	if err != nil {
 		return err
 	}
@@ -363,7 +375,7 @@ func cmdInit(args []string) {
 		die(err)
 	}
 	if _, err := os.Stat(storePath()); os.IsNotExist(err) {
-		if err := saveRecords(nil); err != nil {
+		if err := saveRecords(storeDir(), 0o755, storePath(), nil); err != nil {
 			die(err)
 		}
 	}
@@ -411,7 +423,7 @@ func cmdEncode(args []string) {
 		Cue:     strings.Join(sortedTokens(tokenize(*cue)), " "),
 		Gist:    *gist,
 	}
-	if err := appendRecord(r); err != nil {
+	if err := appendRecord(storeDir(), 0o755, storePath(), 0o644, r); err != nil {
 		die(err)
 	}
 	fmt.Printf("recoil: remembered [%s w=%g] %s\n", r.Trigger, r.Weight, r.Gist)
@@ -449,7 +461,7 @@ func cmdRecall(args []string) {
 		os.Exit(2)
 	}
 
-	recs, err := loadRecords()
+	recs, err := loadRecords(storePath())
 	if err != nil {
 		die(err)
 	}
@@ -482,7 +494,7 @@ func reinforce(recs []record, fired []scored) {
 		recs[f.idx].Hits++
 		recs[f.idx].Last = now
 	}
-	if err := saveRecords(recs); err != nil {
+	if err := saveRecords(storeDir(), 0o755, storePath(), recs); err != nil {
 		fmt.Fprintln(os.Stderr, "recoil:", err)
 	}
 }
@@ -504,7 +516,7 @@ func cmdGuard(args []string) {
 	if len(situation) == 0 {
 		return // nothing to check — stay quiet
 	}
-	recs, err := loadRecords()
+	recs, err := loadRecords(storePath())
 	if err != nil {
 		die(err)
 	}
@@ -527,7 +539,7 @@ func cmdDecay(args []string) {
 	dry := fs.Bool("dry-run", false, "show what would be forgotten without removing it")
 	fs.Parse(args)
 
-	recs, err := loadRecords()
+	recs, err := loadRecords(storePath())
 	if err != nil {
 		die(err)
 	}
@@ -540,7 +552,7 @@ func cmdDecay(args []string) {
 		fmt.Printf("%s: [%s w=%g hits=%d] %s\n", verb, r.Trigger, r.Weight, r.Hits, r.Gist)
 	}
 	if !*dry && len(forget) > 0 {
-		if err := saveRecords(keep); err != nil {
+		if err := saveRecords(storeDir(), 0o755, storePath(), keep); err != nil {
 			die(err)
 		}
 	}
@@ -596,7 +608,7 @@ func recordFailure(cmdArgs []string, errOut string, code int) {
 		Cue:     cue,
 		Gist:    gist,
 	}
-	if err := appendRecord(r); err != nil {
+	if err := appendRecord(storeDir(), 0o755, storePath(), 0o644, r); err != nil {
 		fmt.Fprintln(os.Stderr, "recoil:", err)
 		return
 	}
@@ -699,7 +711,7 @@ func cmdHook(args []string) {
 }
 
 func cmdList(args []string) {
-	recs, err := loadRecords()
+	recs, err := loadRecords(storePath())
 	if err != nil {
 		die(err)
 	}

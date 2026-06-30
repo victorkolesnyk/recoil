@@ -51,6 +51,8 @@ func main() {
 		cmdHook(os.Args[2:])
 	case "list":
 		cmdList(os.Args[2:])
+	case "serve":
+		cmdServe(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("recoil", version)
 	default:
@@ -71,6 +73,7 @@ usage:
   recoil watch -- <command> [args...]    run a command; remember it if it fails
   recoil hook [--install]                git pre/post-commit hooks (warn, record reverts)
   recoil list
+  recoil serve --mcp                  start MCP server (stdio transport for Claude Desktop)
   recoil version
 
 triggers (default weight): correction=3  revert=2.5  test-fail=2  error=1.5  manual=1
@@ -710,6 +713,18 @@ func cmdList(args []string) {
 		fmt.Printf("[%s w=%g hits=%d str=%.2f] %s\n   cue: %s\n",
 			r.Trigger, r.Weight, r.Hits, strength(r, now, hl), r.Gist, r.Cue)
 	}
+}
+
+func cmdServe(args []string) {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	mcp := fs.Bool("mcp", false, "start MCP server over stdio (for Claude Desktop and compatible clients)")
+	fs.Parse(args)
+
+	if !*mcp {
+		fmt.Fprintln(os.Stderr, "recoil serve: use --mcp to start the MCP server")
+		os.Exit(2)
+	}
+	cmdServeMCP()
 }
 
 func die(err error) {
